@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	weakrand "math/rand"
+	"net"
 	"net/http"
 	"sort"
 	"strconv"
@@ -14,6 +15,7 @@ import (
 	"github.com/caddyserver/caddy/v2"
 	"github.com/caddyserver/caddy/v2/modules/caddyhttp"
 	"github.com/caddyserver/certmagic"
+	"github.com/oschwald/geoip2-golang"
 	"go.uber.org/zap"
 )
 
@@ -51,9 +53,14 @@ type Handler struct {
 	// the global or default storage configuration will be used.
 	StorageRaw json.RawMessage `json:"storage,omitempty" caddy:"namespace=caddy.storage inline_key=module"`
 
+	GeoIpPath string `json:"geoip,omitempty"`
+
+	Rules []*Rule `json:"rules,omitempty"`
+
 	rateLimits []*RateLimit
 	storage    certmagic.Storage
 	random     *weakrand.Rand
+	geoip      *geoip2.Reader
 	logger     *zap.Logger
 }
 
@@ -68,6 +75,20 @@ func (Handler) CaddyModule() caddy.ModuleInfo {
 // Provision sets up the handler.
 func (h *Handler) Provision(ctx caddy.Context) error {
 	h.logger = ctx.Logger(h)
+
+	if h.GeoIpPath != "" {
+		db, err := geoip2.Open(h.GeoIpPath)
+		if err != nil {
+			return fmt.Errorf("opening geoip database: %v", err)
+		}
+		h.geoip = db
+	}
+
+	for _, r := range h.Rules {
+		if err := r.provision(); err != nil {
+			return err
+		}
+	}
 
 	if len(h.StorageRaw) > 0 {
 		val, err := ctx.LoadModule(h, "StorageRaw")
@@ -141,6 +162,18 @@ func (h *Handler) Provision(ctx caddy.Context) error {
 
 func (h Handler) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyhttp.Handler) error {
 	repl := r.Context().Value(caddy.ReplacerCtxKey).(*caddy.Replacer)
+
+	for _, rule := range h.Rules {
+		ip_str, _, _ := net.SplitHostPort(r.RemoteAddr)
+		ip := net.ParseIP(ip_str)
+		if rule.match(ip, h.geoip) {
+			if rule.Action=="allow" {
+				return next.ServeHTTP(w, r)
+			} else {
+				return caddyhttp.Error(http.StatusForbidden, fmt.Errorf("Your IP address is not allowed to access this site."))
+			}
+		}
+	}
 
 	// iterate the slice, not the map, so the order is deterministic
 	for _, rl := range h.rateLimits {

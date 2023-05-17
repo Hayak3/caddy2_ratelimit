@@ -2,12 +2,26 @@ package caddyrl
 
 import (
 	"fmt"
+	"net"
 	"sync"
 	"time"
 
 	"github.com/caddyserver/caddy/v2"
 	"github.com/caddyserver/caddy/v2/modules/caddyhttp"
+	"github.com/oschwald/geoip2-golang"
 )
+
+type Rule struct {
+	// allow or deny
+	Action      string `json:"action"`
+	CidrFilter  string `json:"cidr,omitempty"`
+	GeoIpFilter struct {
+		// Country and City are ISO 3166-1
+		City    []string `json:"city,omitempty"`
+		Country []string `json:"country,omitempty"`
+	} `json:"geoip,omitempty"`
+	cidr *net.IPNet
+}
 
 // RateLimit describes an HTTP rate limit zone.
 type RateLimit struct {
@@ -73,4 +87,49 @@ func (rl *RateLimit) provision(ctx caddy.Context, name string) error {
 
 func (rl *RateLimit) permissiveness() float64 {
 	return float64(rl.MaxEvents) / float64(rl.Window)
+}
+
+func (r *Rule) provision() error {
+	if r.Action != "allow" && r.Action != "deny" {
+		return fmt.Errorf("action must be allow or deny")
+	}
+	if len(r.CidrFilter) > 0 {
+		_, cidr, err := net.ParseCIDR(r.CidrFilter)
+		if err != nil {
+			return err
+		}
+		r.cidr = cidr
+	}
+
+	return nil
+}
+
+func (r *Rule) match(ip net.IP, geoip *geoip2.Reader) bool {
+	if r.cidr.Contains(ip) {
+		return true
+	}
+	if geoip == nil {
+		return false
+	}
+	if len(r.GeoIpFilter.City) != 0 || len(r.GeoIpFilter.Country) != 0 {
+		city, err := geoip.City(ip)
+		if err != nil {
+			if len(r.GeoIpFilter.Country) != 0 && Contains(r.GeoIpFilter.Country, city.Country.IsoCode) {
+				return true
+			}
+			if len(r.GeoIpFilter.City) != 0 && Contains(r.GeoIpFilter.City, city.City.Names["zh-CN"]) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func Contains[T comparable](s []T, e T) bool {
+	for _, v := range s {
+		if v == e {
+			return true
+		}
+	}
+	return false
 }

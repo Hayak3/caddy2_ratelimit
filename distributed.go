@@ -3,7 +3,7 @@ package caddyrl
 import (
 	"bytes"
 	"context"
-	"encoding/gob"
+	"encoding/json"
 	"net/http"
 	"path"
 	"strings"
@@ -99,10 +99,11 @@ func (h Handler) syncDistributedWrite(ctx context.Context) error {
 	buf.Reset()
 	defer gobBufPool.Put(buf)
 
-	err := gob.NewEncoder(buf).Encode(state)
+	encoded, err:=json.Marshal(state)
 	if err != nil {
 		return err
 	}
+	buf.Write(encoded)
 	err = h.storage.Store(ctx, path.Join(storagePrefix, h.Distributed.instanceID+".rlstate"), buf.Bytes())
 	if err != nil {
 		return err
@@ -138,7 +139,7 @@ func (h Handler) syncDistributedRead(ctx context.Context) error {
 		}
 
 		var state rlState
-		err = gob.NewDecoder(bytes.NewReader(encoded)).Decode(&state)
+		json.Unmarshal(encoded, &state)
 		if err != nil {
 			h.logger.Error("corrupted rate limiter state file",
 				zap.String("key", instanceFile),
