@@ -167,7 +167,7 @@ func (h Handler) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyhtt
 		ip_str, _, _ := net.SplitHostPort(r.RemoteAddr)
 		ip := net.ParseIP(ip_str)
 		if rule.match(ip, h.geoip) {
-			if rule.Action=="allow" {
+			if rule.Action {
 				return next.ServeHTTP(w, r)
 			} else {
 				return caddyhttp.Error(http.StatusForbidden, fmt.Errorf("Your IP address is not allowed to access this site."))

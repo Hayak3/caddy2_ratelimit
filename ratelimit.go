@@ -12,15 +12,13 @@ import (
 )
 
 type Rule struct {
-	// allow or deny
-	Action      string `json:"action"`
-	CidrFilter  string `json:"cidr,omitempty"`
-	GeoIpFilter struct {
-		// Country and City are ISO 3166-1
-		City    []string `json:"city,omitempty"`
-		Country []string `json:"country,omitempty"`
-	} `json:"geoip,omitempty"`
-	cidr *net.IPNet
+	// true means allow and false means deny
+	Action      bool `json:"action"`
+	CidrFilter  []string `json:"cidr,omitempty"`
+	// Country and City are ISO 3166-1
+	City    []string `json:"city,omitempty"`
+	Country []string `json:"country,omitempty"`
+	cidr []*net.IPNet
 }
 
 // RateLimit describes an HTTP rate limit zone.
@@ -90,34 +88,32 @@ func (rl *RateLimit) permissiveness() float64 {
 }
 
 func (r *Rule) provision() error {
-	if r.Action != "allow" && r.Action != "deny" {
-		return fmt.Errorf("action must be allow or deny")
-	}
-	if len(r.CidrFilter) > 0 {
-		_, cidr, err := net.ParseCIDR(r.CidrFilter)
+	for _, cidr_str := range r.CidrFilter {
+		_, cidr, err := net.ParseCIDR(cidr_str)
 		if err != nil {
 			return err
 		}
-		r.cidr = cidr
+		r.cidr = append(r.cidr, cidr)
 	}
-
 	return nil
 }
 
 func (r *Rule) match(ip net.IP, geoip *geoip2.Reader) bool {
-	if r.cidr.Contains(ip) {
-		return true
+	for _, cidr := range r.cidr {
+		if cidr.Contains(ip) {
+			return true
+		}
 	}
 	if geoip == nil {
 		return false
 	}
-	if len(r.GeoIpFilter.City) != 0 || len(r.GeoIpFilter.Country) != 0 {
+	if len(r.City) != 0 || len(r.Country) != 0 {
 		city, err := geoip.City(ip)
 		if err != nil {
-			if len(r.GeoIpFilter.Country) != 0 && Contains(r.GeoIpFilter.Country, city.Country.IsoCode) {
+			if len(r.Country) != 0 && Contains(r.Country, city.Country.IsoCode) {
 				return true
 			}
-			if len(r.GeoIpFilter.City) != 0 && Contains(r.GeoIpFilter.City, city.City.Names["zh-CN"]) {
+			if len(r.City) != 0 && Contains(r.City, city.City.Names["zh-CN"]) {
 				return true
 			}
 		}

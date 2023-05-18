@@ -84,7 +84,18 @@ This is an HTTP handler module, so it can be used wherever `http.handlers` modul
 		},
 		"storage": {},
 		"jitter": 0.0,
-		"sweep_interval": ""
+		"sweep_interval": "",
+		"rules": [
+			{
+				"action": true,
+				"cidr": ["192.168.0.0/24"],
+			},
+			{
+				"action": true,
+				"city": ["杭州"],
+				"country": ["CN"]
+			}
+		]
 	}
 }
 ```
@@ -174,7 +185,18 @@ We also enable distributed rate limiting. By deploying this config to two or mor
 											"max_events": 2
 										}
 									},
-									"distributed": {}
+									"distributed": {},
+									"rules": [
+										{
+											"action": true,
+											"cidr": ["192.168.0.0/24"],
+										},
+										{
+											"action": true,
+											"city": ["杭州"],
+											"country": ["CN"]
+										}
+									]
 								},
 								{
 									"handler": "static_response",
