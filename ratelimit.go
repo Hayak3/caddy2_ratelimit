@@ -13,12 +13,12 @@ import (
 
 type Rule struct {
 	// true means allow and false means deny
-	Action      bool `json:"action"`
-	CidrFilter  []string `json:"cidr,omitempty"`
+	Action     bool     `json:"action"`
+	CidrFilter []string `json:"cidr,omitempty"`
 	// Country and City are ISO 3166-1
 	City    []string `json:"city,omitempty"`
 	Country []string `json:"country,omitempty"`
-	cidr []*net.IPNet
+	cidr    []*net.IPNet
 }
 
 // RateLimit describes an HTTP rate limit zone.

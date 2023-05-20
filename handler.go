@@ -54,14 +54,14 @@ type Handler struct {
 
 	// Storage backend through which rate limit state is synced. If not set,
 	// the global or default storage configuration will be used.
-	StorageRaw  json.RawMessage `json:"storage,omitempty" caddy:"namespace=caddy.storage inline_key=module"`
-	Redis struct {
+	StorageRaw json.RawMessage `json:"storage,omitempty" caddy:"namespace=caddy.storage inline_key=module"`
+	Redis      struct {
 		Addr     string `json:"addr,omitempty"`
 		Password string `json:"password,omitempty"`
 		DB       int    `json:"db,omitempty"`
-	}          `json:"redis,omitempty"`
-	GeoIpPath   string          `json:"geoip,omitempty"`
-	Rules       []*Rule         `json:"rules,omitempty"`
+	} `json:"redis,omitempty"`
+	GeoIpPath string  `json:"geoip,omitempty"`
+	Rules     []*Rule `json:"rules,omitempty"`
 
 	rateLimits  []*RateLimit
 	geoip       *geoip2.Reader
@@ -150,6 +150,7 @@ func (h Handler) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyhtt
 			}
 		}
 	}
+
 	// iterate the slice, not the map, so the order is deterministic
 	for _, rl := range h.rateLimits {
 		// ignore rate limit if request doesn't qualify
@@ -161,10 +162,10 @@ func (h Handler) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyhtt
 			return limiters.NewTokenBucket(
 				5,
 				time.Duration(rl.Window),
-				limiters.NewLockRedis(h.pool, fmt.Sprintf("/lock/ip/%s", ip)),
+				limiters.NewLockRedis(h.pool, fmt.Sprintf("/l/%s/%s", rl.zoneName, ip)),
 				limiters.NewTokenBucketRedis(
 					h.redisClient,
-					fmt.Sprintf("/ratelimiter/ip/%s", ip),
+					fmt.Sprintf("/r/%s/%s", rl.zoneName, ip),
 					time.Duration(rl.Window), true),
 				clock, logger)
 		}, time.Duration(rl.Window), clock.Now())
