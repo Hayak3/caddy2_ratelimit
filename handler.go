@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	weakrand "math/rand"
 	"net"
 	"net/http"
 	"sort"
@@ -14,8 +13,13 @@ import (
 
 	"github.com/caddyserver/caddy/v2"
 	"github.com/caddyserver/caddy/v2/modules/caddyhttp"
-	"github.com/caddyserver/certmagic"
+
+	redsyncredis "github.com/go-redsync/redsync/v4/redis"
+	"github.com/go-redsync/redsync/v4/redis/goredis/v9"
+	"github.com/mennanov/limiters"
 	"github.com/oschwald/geoip2-golang"
+	goredislib "github.com/redis/go-redis/v9"
+	_ "go.etcd.io/etcd/client/v3"
 	"go.uber.org/zap"
 )
 
@@ -47,21 +51,23 @@ type Handler struct {
 	// because an instance's own configuration is used to calculate whether a
 	// rate limit is exceeded. As usual, a cluster is defined to be all instances
 	// sharing the same storage configuration.
-	Distributed *DistributedRateLimiting `json:"distributed,omitempty"`
 
 	// Storage backend through which rate limit state is synced. If not set,
 	// the global or default storage configuration will be used.
-	StorageRaw json.RawMessage `json:"storage,omitempty" caddy:"namespace=caddy.storage inline_key=module"`
+	StorageRaw  json.RawMessage `json:"storage,omitempty" caddy:"namespace=caddy.storage inline_key=module"`
+	Redis struct {
+		Addr     string `json:"addr,omitempty"`
+		Password string `json:"password,omitempty"`
+		DB       int    `json:"db,omitempty"`
+	}          `json:"redis,omitempty"`
+	GeoIpPath   string          `json:"geoip,omitempty"`
+	Rules       []*Rule         `json:"rules,omitempty"`
 
-	GeoIpPath string `json:"geoip,omitempty"`
-
-	Rules []*Rule `json:"rules,omitempty"`
-
-	rateLimits []*RateLimit
-	storage    certmagic.Storage
-	random     *weakrand.Rand
-	geoip      *geoip2.Reader
-	logger     *zap.Logger
+	rateLimits  []*RateLimit
+	geoip       *geoip2.Reader
+	logger      *zap.Logger
+	redisClient *goredislib.Client
+	pool        redsyncredis.Pool
 }
 
 // CaddyModule returns the Caddy module information.
@@ -75,7 +81,7 @@ func (Handler) CaddyModule() caddy.ModuleInfo {
 // Provision sets up the handler.
 func (h *Handler) Provision(ctx caddy.Context) error {
 	h.logger = ctx.Logger(h)
-
+	h.logger.Error("123")
 	if h.GeoIpPath != "" {
 		db, err := geoip2.Open(h.GeoIpPath)
 		if err != nil {
@@ -83,53 +89,30 @@ func (h *Handler) Provision(ctx caddy.Context) error {
 		}
 		h.geoip = db
 	}
-
 	for _, r := range h.Rules {
 		if err := r.provision(); err != nil {
 			return err
 		}
 	}
 
-	if len(h.StorageRaw) > 0 {
-		val, err := ctx.LoadModule(h, "StorageRaw")
-		if err != nil {
-			return fmt.Errorf("loading storage module: %v", err)
-		}
-		stor, err := val.(caddy.StorageConverter).CertMagicStorage()
-		if err != nil {
-			return fmt.Errorf("creating storage value: %v", err)
-		}
-		h.storage = stor
-	} else {
-		h.storage = ctx.Storage()
+	h.redisClient = goredislib.NewClient(&goredislib.Options{
+		Addr:     h.Redis.Addr,
+		Password: h.Redis.Password,
+		DB:       h.Redis.DB})
+	h.pool = goredis.NewPool(h.redisClient)
+	_, err := h.redisClient.Ping(ctx.Context).Result()
+	if err != nil {
+		return fmt.Errorf("redis ping: %v", err)
 	}
+	clock := limiters.NewSystemClock()
 
-	if h.Distributed != nil {
-		// TODO: maybe choose defaults intelligently based on window durations?
-		if h.Distributed.ReadInterval == 0 {
-			h.Distributed.ReadInterval = caddy.Duration(5 * time.Second)
+	go func() {
+		// Garbage collect the old limiters to prevent memory leaks.
+		for {
+			<-time.After(time.Duration(100))
+			registry.DeleteExpired(clock.Now())
 		}
-		if h.Distributed.WriteInterval == 0 {
-			h.Distributed.WriteInterval = caddy.Duration(5 * time.Second)
-		}
-
-		iid, err := caddy.InstanceID()
-		if err != nil {
-			return err
-		}
-		h.Distributed.instanceID = iid.String()
-
-		// gather distributed RL states right away so we can properly adjust
-		// our rate limiting decisions to account for other instances
-		err = h.syncDistributedRead(ctx)
-		if err != nil {
-			h.logger.Error("gathering initial rate limiter states", zap.Error(err))
-		}
-
-		// keep RL state synced
-		go h.syncDistributed(ctx)
-	}
-
+	}()
 	// provision each rate limit and put them in a slice so we can sort them
 	for name, rl := range h.RateLimits {
 		rl.zoneName = name
@@ -145,12 +128,6 @@ func (h *Handler) Provision(ctx caddy.Context) error {
 		return h.rateLimits[i].permissiveness() > h.rateLimits[j].permissiveness()
 	})
 
-	if h.Jitter < 0 {
-		return fmt.Errorf("jitter must be at least zero")
-	} else if h.Jitter > 0 {
-		h.random = weakrand.New(weakrand.NewSource(now().UnixNano()))
-	}
-
 	// clean up old rate limiters while handler is running
 	if h.SweepInterval == 0 {
 		h.SweepInterval = caddy.Duration(1 * time.Minute)
@@ -161,55 +138,42 @@ func (h *Handler) Provision(ctx caddy.Context) error {
 }
 
 func (h Handler) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyhttp.Handler) error {
+	ip_str, _, _ := net.SplitHostPort(r.RemoteAddr)
+	ip := net.ParseIP(ip_str)
 	repl := r.Context().Value(caddy.ReplacerCtxKey).(*caddy.Replacer)
-
 	for _, rule := range h.Rules {
-		ip_str, _, _ := net.SplitHostPort(r.RemoteAddr)
-		ip := net.ParseIP(ip_str)
 		if rule.match(ip, h.geoip) {
 			if rule.Action {
 				return next.ServeHTTP(w, r)
 			} else {
-				return caddyhttp.Error(http.StatusForbidden, fmt.Errorf("Your IP address is not allowed to access this site."))
+				return caddyhttp.Error(http.StatusForbidden, fmt.Errorf("your IP address is not allowed to access this site"))
 			}
 		}
 	}
-
 	// iterate the slice, not the map, so the order is deterministic
 	for _, rl := range h.rateLimits {
 		// ignore rate limit if request doesn't qualify
 		if !rl.matcherSets.AnyMatch(r) {
 			continue
 		}
-
-		// make key for the individual rate limiter in this zone
-		key := repl.ReplaceAll(rl.Key, "")
-
-		// the API for sync.Pool is unfortunate: there is no LoadOrNew() method
-		// which allocates/constructs a value only if needed, so we always need
-		// to pre-allocate the value even if we never use it; we should be able
-		// to relieve some memory pressure by putting unused values back into a
-		// pool...
-		limiter := ringBufPool.Get().(*ringBufferRateLimiter)
-		if val, loaded := rl.limiters.LoadOrStore(key, limiter); loaded {
-			ringBufPool.Put(limiter) // didn't use; save for next time
-			limiter = val.(*ringBufferRateLimiter)
-		} else {
-			// as another side-effect of sync.Map's bad API, avoid all the
-			// work of initializing the ring buffer unless we have to
-			limiter.initialize(rl.MaxEvents, time.Duration(rl.Window))
-		}
-
-		if h.Distributed == nil {
-			// internal rate limiter only
-			if dur := limiter.When(); dur > 0 {
-				return h.rateLimitExceeded(w, repl, rl.zoneName, dur)
-			}
-		} else {
-			// distributed rate limiting; add last known state of other instances
-			if err := h.distributedRateLimiting(w, repl, limiter, key, rl.zoneName); err != nil {
-				return err
-			}
+		logger := limiters.NewStdLogger()
+		bucket := registry.GetOrCreate(ip_str, func() interface{} {
+			return limiters.NewTokenBucket(
+				5,
+				time.Duration(rl.Window),
+				limiters.NewLockRedis(h.pool, fmt.Sprintf("/lock/ip/%s", ip)),
+				limiters.NewTokenBucketRedis(
+					h.redisClient,
+					fmt.Sprintf("/ratelimiter/ip/%s", ip),
+					time.Duration(rl.Window), true),
+				clock, logger)
+		}, time.Duration(rl.Window), clock.Now())
+		wait, err := bucket.(*limiters.TokenBucket).Limit(r.Context())
+		if err == limiters.ErrLimitExhausted {
+			return h.rateLimitExceeded(w, repl, rl.zoneName, wait)
+		} else if err != nil {
+			// The limiter failed. This error should be logged and examined.
+			return caddyhttp.Error(http.StatusTooManyRequests, nil)
 		}
 	}
 
@@ -217,12 +181,6 @@ func (h Handler) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyhtt
 }
 
 func (h *Handler) rateLimitExceeded(w http.ResponseWriter, repl *caddy.Replacer, zoneName string, wait time.Duration) error {
-	// add jitter, if configured
-	if h.random != nil {
-		jitter := h.randomFloatInRange(0, float64(wait)*h.Jitter)
-		wait += time.Duration(jitter)
-	}
-
 	// add 0.5 to ceil() instead of round() which FormatFloat() does automatically
 	w.Header().Set("Retry-After", strconv.FormatFloat(wait.Seconds()+0.5, 'f', 0, 64))
 
@@ -239,13 +197,6 @@ func (h *Handler) Cleanup() error {
 		rateLimits.Delete(name)
 	}
 	return nil
-}
-
-func (h Handler) randomFloatInRange(min, max float64) float64 {
-	if h.random == nil {
-		return 0
-	}
-	return min + h.random.Float64()*(max-min)
 }
 
 func (h Handler) sweepRateLimiters(ctx context.Context) {
@@ -302,13 +253,8 @@ func (h Handler) sweepRateLimiters(ctx context.Context) {
 
 // rateLimits persists RL zones through config changes.
 var rateLimits = caddy.NewUsagePool()
-
-// ringBufPool reduces allocations from unneeded rate limiters.
-var ringBufPool = sync.Pool{
-	New: func() interface{} {
-		return new(ringBufferRateLimiter)
-	},
-}
+var registry = limiters.NewRegistry()
+var clock = limiters.NewSystemClock()
 
 // Interface guards
 var (

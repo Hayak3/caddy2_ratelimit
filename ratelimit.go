@@ -32,7 +32,7 @@ type RateLimit struct {
 	// rate limiters. For example, a key of "foo" will create exactly one rate limiter
 	// for all clients. But a key of "{http.request.remote.host}" will create one rate
 	// limiter for each different client IP address.
-	Key string `json:"key,omitempty"`
+	// Key string `json:"key,omitempty"`
 
 	// Number of events allowed within the window.
 	MaxEvents int `json:"max_events,omitempty"`
