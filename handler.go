@@ -1,14 +1,12 @@
 package caddyrl
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
 	"net"
 	"net/http"
 	"sort"
 	"strconv"
-	"sync"
 	"time"
 
 	"github.com/caddyserver/caddy/v2"
@@ -39,12 +37,6 @@ type Handler struct {
 	// RateLimits contains the definitions of the rate limit zones, keyed by name.
 	// The name **MUST** be globally unique across all other instances of this handler.
 	RateLimits map[string]*RateLimit `json:"rate_limits,omitempty"`
-
-	// Percentage jitter on expiration times (example: 0.2 means 20% jitter)
-	Jitter float64 `json:"jitter,omitempty"`
-
-	// How often to scan for expired rate limit states. Default: 1m.
-	SweepInterval caddy.Duration `json:"sweep_interval,omitempty"`
 
 	// Enables distributed rate limiting. For this to work properly, rate limit
 	// zones must have the same configuration for all instances in the cluster
@@ -81,7 +73,6 @@ func (Handler) CaddyModule() caddy.ModuleInfo {
 // Provision sets up the handler.
 func (h *Handler) Provision(ctx caddy.Context) error {
 	h.logger = ctx.Logger(h)
-	h.logger.Error("123")
 	if h.GeoIpPath != "" {
 		db, err := geoip2.Open(h.GeoIpPath)
 		if err != nil {
@@ -106,13 +97,6 @@ func (h *Handler) Provision(ctx caddy.Context) error {
 	}
 	clock := limiters.NewSystemClock()
 
-	go func() {
-		// Garbage collect the old limiters to prevent memory leaks.
-		for {
-			<-time.After(time.Duration(100))
-			registry.DeleteExpired(clock.Now())
-		}
-	}()
 	// provision each rate limit and put them in a slice so we can sort them
 	for name, rl := range h.RateLimits {
 		rl.zoneName = name
@@ -128,12 +112,13 @@ func (h *Handler) Provision(ctx caddy.Context) error {
 		return h.rateLimits[i].permissiveness() > h.rateLimits[j].permissiveness()
 	})
 
-	// clean up old rate limiters while handler is running
-	if h.SweepInterval == 0 {
-		h.SweepInterval = caddy.Duration(1 * time.Minute)
-	}
-	go h.sweepRateLimiters(ctx)
-
+	go func() {
+		// Garbage collect the old limiters to prevent memory leaks.
+		for {
+			<-time.After(time.Duration(100))
+			registry.DeleteExpired(clock.Now())
+		}
+	}()
 	return nil
 }
 
@@ -146,6 +131,7 @@ func (h Handler) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyhtt
 			if rule.Action {
 				return next.ServeHTTP(w, r)
 			} else {
+				h.logger.Warn("unallow access from region", zap.String("ip", ip_str))
 				return caddyhttp.Error(http.StatusForbidden, fmt.Errorf("your IP address is not allowed to access this site"))
 			}
 		}
@@ -171,9 +157,11 @@ func (h Handler) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyhtt
 		}, time.Duration(rl.Window), clock.Now())
 		wait, err := bucket.(*limiters.TokenBucket).Limit(r.Context())
 		if err == limiters.ErrLimitExhausted {
+			h.logger.Warn("rate limit exceeded", zap.String("ip", ip_str))
 			return h.rateLimitExceeded(w, repl, rl.zoneName, wait)
 		} else if err != nil {
 			// The limiter failed. This error should be logged and examined.
+			h.logger.Error("limiter failed", zap.Error(err))
 			return caddyhttp.Error(http.StatusTooManyRequests, nil)
 		}
 	}
@@ -198,58 +186,6 @@ func (h *Handler) Cleanup() error {
 		rateLimits.Delete(name)
 	}
 	return nil
-}
-
-func (h Handler) sweepRateLimiters(ctx context.Context) {
-	cleanerTicker := time.NewTicker(time.Duration(h.SweepInterval))
-	defer cleanerTicker.Stop()
-
-	for {
-		select {
-		case <-cleanerTicker.C:
-			// iterate all rate limit zones
-			rateLimits.Range(func(key, value interface{}) bool {
-				rlMap := value.(*sync.Map)
-
-				// iterate all static and dynamic rate limiters within zone
-				rlMap.Range(func(key, value interface{}) bool {
-					if value == nil {
-						return true
-					}
-					rl := value.(*ringBufferRateLimiter)
-
-					rl.mu.Lock()
-					// no point in keeping a ring buffer of size 0 around
-					if len(rl.ring) == 0 {
-						rl.mu.Unlock()
-						rlMap.Delete(key)
-						return true
-					}
-					// get newest event in ring (should come right before oldest)
-					cursorNewest := rl.cursor - 1
-					if cursorNewest < 0 {
-						cursorNewest = len(rl.ring) - 1
-					}
-					newest := rl.ring[cursorNewest]
-					window := rl.window
-					rl.mu.Unlock()
-
-					// if newest event in memory is outside the window,
-					// the entire ring has expired and can be forgotten
-					if newest.Add(window).Before(now()) {
-						rlMap.Delete(key)
-					}
-
-					return true
-				})
-
-				return true
-			})
-
-		case <-ctx.Done():
-			return
-		}
-	}
 }
 
 // rateLimits persists RL zones through config changes.

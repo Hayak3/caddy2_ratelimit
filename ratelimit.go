@@ -3,9 +3,6 @@ package caddyrl
 import (
 	"fmt"
 	"net"
-	"sync"
-	"time"
-
 	"github.com/caddyserver/caddy/v2"
 	"github.com/caddyserver/caddy/v2/modules/caddyhttp"
 	"github.com/oschwald/geoip2-golang"
@@ -44,7 +41,6 @@ type RateLimit struct {
 
 	zoneName string
 
-	limiters *sync.Map
 }
 
 func (rl *RateLimit) provision(ctx caddy.Context, name string) error {
@@ -66,19 +62,7 @@ func (rl *RateLimit) provision(ctx caddy.Context, name string) error {
 		}
 	}
 
-	// ensure rate limiter state endures across config changes
-	rl.limiters = new(sync.Map)
-	if val, loaded := rateLimits.LoadOrStore(name, rl.limiters); loaded {
-		rl.limiters = val.(*sync.Map)
-	}
 
-	// update existing rate limiters with new settings
-	rl.limiters.Range(func(key, value interface{}) bool {
-		limiter := value.(*ringBufferRateLimiter)
-		limiter.SetMaxEvents(rl.MaxEvents)
-		limiter.SetWindow(time.Duration(rl.Window))
-		return true
-	})
 
 	return nil
 }
