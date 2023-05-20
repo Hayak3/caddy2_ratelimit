@@ -88,14 +88,15 @@ This is an HTTP handler module, so it can be used wherever `http.handlers` modul
 		"rules": [
 			{
 				"action": true,
-				"cidr": ["192.168.0.0/24"],
+				"cidr": ["192.168.0.0/24"]
 			},
 			{
 				"action": true,
 				"city": ["杭州"],
 				"country": ["CN"]
 			}
-		]
+		],
+		"geoip": ""
 	}
 }
 ```
@@ -189,14 +190,15 @@ We also enable distributed rate limiting. By deploying this config to two or mor
 									"rules": [
 										{
 											"action": true,
-											"cidr": ["192.168.0.0/24"],
+											"cidr": ["192.168.0.0/24"]
 										},
 										{
 											"action": true,
 											"city": ["杭州"],
 											"country": ["CN"]
 										}
-									]
+									],
+									"geoip": "./GeoLite2-City.mmdb"
 								},
 								{
 									"handler": "static_response",
