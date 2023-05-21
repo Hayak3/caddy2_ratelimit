@@ -2,10 +2,10 @@ package caddyrl
 
 import (
 	"fmt"
-	"net"
 	"github.com/caddyserver/caddy/v2"
 	"github.com/caddyserver/caddy/v2/modules/caddyhttp"
 	"github.com/oschwald/geoip2-golang"
+	"net"
 )
 
 type Rule struct {
@@ -40,7 +40,6 @@ type RateLimit struct {
 	matcherSets caddyhttp.MatcherSets
 
 	zoneName string
-
 }
 
 func (rl *RateLimit) provision(ctx caddy.Context, name string) error {
@@ -61,8 +60,6 @@ func (rl *RateLimit) provision(ctx caddy.Context, name string) error {
 			return err
 		}
 	}
-
-
 
 	return nil
 }

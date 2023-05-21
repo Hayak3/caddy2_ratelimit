@@ -115,7 +115,7 @@ func (h *Handler) Provision(ctx caddy.Context) error {
 	go func() {
 		// Garbage collect the old limiters to prevent memory leaks.
 		for {
-			<-time.After(time.Duration(100))
+			<-time.After(time.Duration(10 * time.Second))
 			registry.DeleteExpired(clock.Now())
 		}
 	}()
