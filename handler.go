@@ -6,7 +6,6 @@ import (
 	"net"
 	"net/http"
 	"sort"
-	"strconv"
 	"time"
 
 	"github.com/caddyserver/caddy/v2"
@@ -112,12 +111,15 @@ func (h *Handler) Provision(ctx caddy.Context) error {
 	sort.Slice(h.rateLimits, func(i, j int) bool {
 		return h.rateLimits[i].permissiveness() > h.rateLimits[j].permissiveness()
 	})
-
 	go func() {
 		// Garbage collect the old limiters to prevent memory leaks.
 		for {
-			<-time.After(time.Duration(10 * time.Second))
-			registry.DeleteExpired(clock.Now())
+			select {
+			case <-ctx.Context.Done():
+				return
+			case <-time.After(time.Duration(10 * time.Second)):
+				registry.DeleteExpired(clock.Now())
+			}
 		}
 	}()
 	return nil
@@ -126,14 +128,14 @@ func (h *Handler) Provision(ctx caddy.Context) error {
 func (h Handler) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyhttp.Handler) error {
 	ip_str, _, _ := net.SplitHostPort(r.RemoteAddr)
 	ip := net.ParseIP(ip_str)
-	repl := r.Context().Value(caddy.ReplacerCtxKey).(*caddy.Replacer)
 	for _, rule := range h.Rules {
 		if rule.match(ip, h.geoip) {
 			if rule.Action {
+				h.logger.Debug("allow access from region", zap.Int("type", 0), zap.String("ip", ip_str), zap.String("zone", h.rateLimits[0].zoneName))
 				return next.ServeHTTP(w, r)
 			} else {
-				h.logger.Warn("unallow access from region", zap.String("ip", ip_str))
-				return caddyhttp.Error(http.StatusForbidden, fmt.Errorf("your IP address is not allowed to access this site"))
+				h.logger.Warn("unallow access from region", zap.Int("type", 1), zap.String("ip", ip_str), zap.String("zone", h.rateLimits[0].zoneName))
+				return h.rateLimitExceeded(w)
 			}
 		}
 	}
@@ -156,13 +158,11 @@ func (h Handler) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyhtt
 					time.Duration(rl.Window), true),
 				clock, logger)
 		}, time.Duration(rl.Window), clock.Now())
-		wait, err := bucket.(*limiters.TokenBucket).Limit(r.Context())
+		_, err := bucket.(*limiters.TokenBucket).Limit(r.Context())
 		if err == limiters.ErrLimitExhausted {
-			h.logger.Warn("rate limit exceeded", zap.String("ip", ip_str), zap.String("zone", rl.zoneName))
-			return h.rateLimitExceeded(w, repl, rl.zoneName, wait)
+			h.logger.Warn("rate limit exceeded", zap.Int("type", 2), zap.String("ip", ip_str), zap.String("zone", rl.zoneName))
+			return h.rateLimitExceeded(w)
 		} else if err != nil {
-			// The limiter failed. This error should be logged and examined.
-			h.logger.Error("limiter failed", zap.Error(err), zap.String("ip", ip_str), zap.String("zone", rl.zoneName))
 			return caddyhttp.Error(http.StatusTooManyRequests, nil)
 		}
 	}
@@ -170,13 +170,11 @@ func (h Handler) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyhtt
 	return next.ServeHTTP(w, r)
 }
 
-func (h *Handler) rateLimitExceeded(w http.ResponseWriter, repl *caddy.Replacer, zoneName string, wait time.Duration) error {
-	if h.Relocation!="" {
-		w.Header().Set("Location", repl.ReplaceAll(h.Relocation, ""))
+func (h *Handler) rateLimitExceeded(w http.ResponseWriter) error {
+	if h.Relocation != "" {
+		w.Header().Set("Location", h.Relocation)
 		return caddyhttp.Error(http.StatusTemporaryRedirect, nil)
-	}else{
-		// add 0.5 to ceil() instead of round() which FormatFloat() does automatically
-		w.Header().Set("Retry-After", strconv.FormatFloat(wait.Seconds()+0.5, 'f', 0, 64))
+	} else {
 		return caddyhttp.Error(http.StatusTooManyRequests, nil)
 	}
 }
@@ -187,6 +185,7 @@ func (h *Handler) Cleanup() error {
 	for name := range h.RateLimits {
 		rateLimits.Delete(name)
 	}
+	h.redisClient.Close()
 	return nil
 }
 
