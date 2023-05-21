@@ -52,8 +52,9 @@ type Handler struct {
 		Password string `json:"password,omitempty"`
 		DB       int    `json:"db,omitempty"`
 	} `json:"redis,omitempty"`
-	GeoIpPath string  `json:"geoip,omitempty"`
-	Rules     []*Rule `json:"rules,omitempty"`
+	GeoIpPath  string  `json:"geoip,omitempty"`
+	Rules      []*Rule `json:"rules,omitempty"`
+	Relocation string  `json:"relocation,omitempty"`
 
 	rateLimits  []*RateLimit
 	geoip       *geoip2.Reader
@@ -157,11 +158,11 @@ func (h Handler) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyhtt
 		}, time.Duration(rl.Window), clock.Now())
 		wait, err := bucket.(*limiters.TokenBucket).Limit(r.Context())
 		if err == limiters.ErrLimitExhausted {
-			h.logger.Warn("rate limit exceeded", zap.String("ip", ip_str))
+			h.logger.Warn("rate limit exceeded", zap.String("ip", ip_str), zap.String("zone", rl.zoneName))
 			return h.rateLimitExceeded(w, repl, rl.zoneName, wait)
 		} else if err != nil {
 			// The limiter failed. This error should be logged and examined.
-			h.logger.Error("limiter failed", zap.Error(err))
+			h.logger.Error("limiter failed", zap.Error(err), zap.String("ip", ip_str), zap.String("zone", rl.zoneName))
 			return caddyhttp.Error(http.StatusTooManyRequests, nil)
 		}
 	}
@@ -170,13 +171,14 @@ func (h Handler) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyhtt
 }
 
 func (h *Handler) rateLimitExceeded(w http.ResponseWriter, repl *caddy.Replacer, zoneName string, wait time.Duration) error {
-	// add 0.5 to ceil() instead of round() which FormatFloat() does automatically
-	w.Header().Set("Retry-After", strconv.FormatFloat(wait.Seconds()+0.5, 'f', 0, 64))
-
-	// make some information about this rate limit available
-	repl.Set("http.rate_limit.exceeded.name", zoneName)
-
-	return caddyhttp.Error(http.StatusTooManyRequests, nil)
+	if h.Relocation!="" {
+		w.Header().Set("Location", repl.ReplaceAll(h.Relocation, ""))
+		return caddyhttp.Error(http.StatusTemporaryRedirect, nil)
+	}else{
+		// add 0.5 to ceil() instead of round() which FormatFloat() does automatically
+		w.Header().Set("Retry-After", strconv.FormatFloat(wait.Seconds()+0.5, 'f', 0, 64))
+		return caddyhttp.Error(http.StatusTooManyRequests, nil)
+	}
 }
 
 // Cleanup cleans up the handler.
