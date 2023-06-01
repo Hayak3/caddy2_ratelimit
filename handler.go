@@ -1,7 +1,6 @@
 package caddyrl
 
 import (
-	"encoding/json"
 	"fmt"
 	"net"
 	"net/http"
@@ -45,7 +44,6 @@ type Handler struct {
 
 	// Storage backend through which rate limit state is synced. If not set,
 	// the global or default storage configuration will be used.
-	StorageRaw json.RawMessage `json:"storage,omitempty" caddy:"namespace=caddy.storage inline_key=module"`
 	Redis      struct {
 		Addr     string `json:"addr,omitempty"`
 		Password string `json:"password,omitempty"`
@@ -141,12 +139,12 @@ func (h Handler) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyhtt
 	}
 
 	// iterate the slice, not the map, so the order is deterministic
+	logger := limiters.NewStdLogger()
 	for _, rl := range h.rateLimits {
 		// ignore rate limit if request doesn't qualify
 		if !rl.matcherSets.AnyMatch(r) {
 			continue
 		}
-		logger := limiters.NewStdLogger()
 		bucket := registry.GetOrCreate(ip_str, func() interface{} {
 			return limiters.NewTokenBucket(
 				5,
