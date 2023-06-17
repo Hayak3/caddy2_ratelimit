@@ -1,0 +1,8 @@
+# .github/release.yml
+
+changelog:
+  categories:
+    - title: Changes
+      labels:
+        - "*"
+
