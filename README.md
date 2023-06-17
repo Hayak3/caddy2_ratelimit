@@ -15,7 +15,6 @@ This module implements both internal and distributed HTTP rate limiting. Request
 
 **PLANNED:**
 
-- caddyfile support
 - other storage support
 - api for unblock banned ip
 - choice for ratelimit algorithm
@@ -28,18 +27,6 @@ To build Caddy with this module, use [xcaddy](https://github.com/caddyserver/xca
 $ xcaddy build --with github.com/hayak3/caddy-ratelimit
 ```
 
-
-## Overview
-
-The `rate_limit` HTTP handler module lets you define rate limit zones, which have a unique name of your choosing. A rate limit zone is 1:1 with a rate limit (i.e. events per duration).
-
-A zone also has a key, which is different from its name. Keys associate 1:1 with rate limiters, implemented as ring buffers; i.e. a new key implies allocating a new ring buffer. Keys can be static (no placeholders; same for every request), in which case only one rate limiter will be allocated for the whole zone. Or, keys can contain placeholders which can be different for every request, in which case a zone may contain numerous rate limiters depending on the result of expanding the key.
-
-A zone is synomymous with a rate limit, being a number of events per duration. Both `window` and `max_events` are required configuration for a zone. For example: 100 events every 1 minute. Because this module uses a sliding window algorithm, it works by looking back `<window>` duration and seeing if `<max_events>` events have already happened in that timeframe. If so, an internal HTTP 429 error is generated and returned, invoking error routes which you have defined (if any). Otherwise, the a reservation is made and the event is allowed through.
-
-Each zone may optionally filter the requests it applies to by specifying [request matchers](https://caddyserver.com/docs/modules/http#servers/routes/match).
-
-Unlike nginx's rate limit module, this one does not require you to set a memory bound. Instead, rate limiters are scanned every so often and expired ones are deleted so their memory can be recovered by the garbage collector: Caddy does not drop rate limiters on the floor and forget events like nginx does.
 
 ### Distributed rate limiting
 
@@ -81,7 +68,43 @@ This is an HTTP handler module, so it can be used wherever `http.handlers` modul
 	}
 }
 ```
-
+### CaddyFile example
+```
+http://example.com {
+	rate_limit {
+		zone static_example {
+			max_events 100
+			window 1m
+		}
+		zone dynamic_example {
+			max_events 2
+			window 5s
+		}
+		redis {
+			addr 127.0.0.1:6379
+			password ""
+			db 0
+		}
+		rule {
+			{
+				action allow
+				cidr "192.168.0.1/32" "192.168.0.0/24"
+				city "Paris" "London"
+			}
+			{
+				action deny
+				cidr "192.168.1.1/32" "192.168.5.0/24"
+				city "Paris" "London"
+			}
+		}
+		geoip ./geoip/GeoLite2-City.mmdb
+		relocation example.com
+	}
+	reverse_proxy * http://127.0.0.1:8080 {
+		header_up Host {upstream_hostport}
+	}
+}
+```
 
 ### JSON example
 
@@ -112,7 +135,6 @@ This is an HTTP handler module, so it can be used wherever `http.handlers` modul
 											"max_events": 2
 										}
 									},
-									"distributed": {},
 									"rules": [
 										{
 											"action": true,

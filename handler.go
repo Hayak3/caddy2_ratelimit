@@ -44,15 +44,14 @@ type Handler struct {
 
 	// Storage backend through which rate limit state is synced. If not set,
 	// the global or default storage configuration will be used.
-	Redis      struct {
+	Redis struct {
 		Addr     string `json:"addr,omitempty"`
 		Password string `json:"password,omitempty"`
 		DB       int    `json:"db,omitempty"`
 	} `json:"redis,omitempty"`
-	GeoIpPath  string  `json:"geoip,omitempty"`
-	Rules      []*Rule `json:"rules,omitempty"`
-	Relocation string  `json:"relocation,omitempty"`
-
+	GeoIpPath   string  `json:"geoip,omitempty"`
+	Rules       []*Rule `json:"rules,omitempty"`
+	Relocation  string  `json:"relocation,omitempty"`
 	rateLimits  []*RateLimit
 	geoip       *geoip2.Reader
 	logger      *zap.Logger
