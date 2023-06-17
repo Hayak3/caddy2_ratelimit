@@ -8,7 +8,6 @@ This module implements both internal and distributed HTTP rate limiting. Request
 ## Features
 
 - Multiple rate limit zones
-- Sliding window algorithm
 - IP white list and black list,support cidr
 - RL state persisted through config reloads or restart with redis
 - Distributed rate limiting across a cluster
@@ -17,9 +16,9 @@ This module implements both internal and distributed HTTP rate limiting. Request
 **PLANNED:**
 
 - caddyfile support
-- etcd and other storage support
+- other storage support
 - api for unblock banned ip
-- choose ratelimit algorithm
+- choice for ratelimit algorithm
 
 ## Building
 
