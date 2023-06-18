@@ -1,4 +1,4 @@
-Caddy HTTP Rate Limit Module
+Caddy HTTP Rate Limit Module(This is a fork of https://github.com/mholt/caddy-ratelimit)
 ============================
 
 This module implements both internal and distributed HTTP rate limiting. Requests can be rejected after a specified rate limit is hit.
