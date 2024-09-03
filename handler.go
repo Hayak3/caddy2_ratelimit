@@ -15,6 +15,7 @@
 package caddyrl
 
 import (
+	"context"
 	"fmt"
 	"net"
 	"net/http"
@@ -139,6 +140,48 @@ func (h *Handler) Provision(ctx caddy.Context) error {
 func (h Handler) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyhttp.Handler) error {
 	ip_str, _, _ := net.SplitHostPort(r.RemoteAddr)
 	ip := net.ParseIP(ip_str)
+
+	if r.Method == http.MethodPost && r.URL.Path == "/unblock_ip" {
+		ip := r.URL.Query().Get("ip")
+		if ip == "" {
+			http.Error(w, "IP parameter is missing", http.StatusBadRequest)
+			return nil
+		}
+		err := h.UnblockIP(ip)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return nil
+		}
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("IP unblocked successfully"))
+		return nil
+	}
+
+	if r.Method == http.MethodPost && r.URL.Path == "/set_ban_duration" {
+		ip := r.URL.Query().Get("ip")
+		durationStr := r.URL.Query().Get("duration")
+		if ip == "" || durationStr == "" {
+			http.Error(w, "IP or duration parameter is missing", http.StatusBadRequest)
+			return nil
+		}
+
+		duration, err := time.ParseDuration(durationStr + "s")
+		if err != nil {
+			http.Error(w, "Invalid duration format", http.StatusBadRequest)
+			return nil
+		}
+
+		err = h.setBanDuration(ip, duration)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return nil
+		}
+
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("Ban duration set successfully"))
+		return nil
+	}
+
 	for _, rule := range h.Rules {
 		if rule.match(ip, h.geoip) {
 			if rule.Action {
@@ -154,7 +197,6 @@ func (h Handler) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyhtt
 	// iterate the slice, not the map, so the order is deterministic
 	logger := limiters.NewStdLogger()
 	for _, rl := range h.rateLimits {
-		// ignore rate limit if request doesn't qualify
 		if !rl.matcherSets.AnyMatch(r) {
 			continue
 		}
@@ -171,6 +213,13 @@ func (h Handler) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyhtt
 		}, time.Duration(rl.Window), clock.Now())
 		_, err := bucket.(*limiters.TokenBucket).Limit(r.Context())
 		if err == limiters.ErrLimitExhausted {
+			if rl.BanDuration > 0 {
+				banKey := fmt.Sprintf("/banned/%s", ip_str)
+				err := h.redisClient.Set(r.Context(), banKey, "banned", time.Duration(rl.BanDuration)).Err()
+				if err != nil {
+					h.logger.Error("failed to set ban duration", zap.String("ip", ip_str), zap.Error(err))
+				}
+			}
 			h.logger.Warn("rate limit exceeded", zap.Int("type", 2), zap.String("ip", ip_str), zap.String("zone", rl.zoneName))
 			return h.rateLimitExceeded(w)
 		} else if err != nil {
@@ -188,6 +237,27 @@ func (h *Handler) rateLimitExceeded(w http.ResponseWriter) error {
 	} else {
 		return caddyhttp.Error(http.StatusTooManyRequests, nil)
 	}
+}
+func (h *Handler) UnblockIP(ip string) error {
+	exists := registry.Exists(ip)
+	if !exists {
+		h.logger.Warn("IP not found in registry", zap.String("ip", ip))
+		return fmt.Errorf("IP %s not found", ip)
+	}
+	registry.Delete(ip)
+	h.logger.Info("unblocked IP", zap.String("ip", ip))
+	return nil
+}
+
+func (h *Handler) setBanDuration(ip string, duration time.Duration) error {
+	banKey := fmt.Sprintf("/banned/%s", ip)
+	err := h.redisClient.Set(context.Background(), banKey, "banned", duration).Err()
+	if err != nil {
+		h.logger.Error("failed to set ban duration", zap.String("ip", ip), zap.Error(err))
+		return err
+	}
+	h.logger.Info("ban duration set", zap.String("ip", ip), zap.Duration("duration", duration))
+	return nil
 }
 
 // Cleanup cleans up the handler.
