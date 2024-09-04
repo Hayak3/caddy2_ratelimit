@@ -52,6 +52,8 @@ type RateLimit struct {
 	// Duration of the sliding window.
 	Window caddy.Duration `json:"window,omitempty"`
 
+	BanDuration caddy.Duration `json:"ban_duration,omitempty"`
+
 	matcherSets caddyhttp.MatcherSets
 
 	zoneName string
@@ -63,6 +65,10 @@ func (rl *RateLimit) provision(ctx caddy.Context, name string) error {
 	}
 	if rl.MaxEvents < 0 {
 		return fmt.Errorf("max_events must be at least zero")
+	}
+
+	if rl.BanDuration < 0 {
+		return fmt.Errorf("ban_duration must be non-negative")
 	}
 
 	if len(rl.MatcherSetsRaw) > 0 {
