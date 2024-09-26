@@ -23,8 +23,8 @@ import (
 	"time"
 
 	"github.com/caddyserver/caddy/v2"
+	"github.com/caddyserver/caddy/v2/modules/caddyevents"
 	"github.com/caddyserver/caddy/v2/modules/caddyhttp"
-
 	redsyncredis "github.com/go-redsync/redsync/v4/redis"
 	"github.com/go-redsync/redsync/v4/redis/goredis/v9"
 	"github.com/mennanov/limiters"
@@ -72,6 +72,8 @@ type Handler struct {
 	logger      *zap.Logger
 	redisClient *goredislib.Client
 	pool        redsyncredis.Pool
+	ctx         caddy.Context
+	events      *caddyevents.App
 }
 
 // CaddyModule returns the Caddy module information.
@@ -84,7 +86,15 @@ func (Handler) CaddyModule() caddy.ModuleInfo {
 
 // Provision sets up the handler.
 func (h *Handler) Provision(ctx caddy.Context) error {
+	h.ctx = ctx
 	h.logger = ctx.Logger(h)
+
+	eventsAppIface, err := ctx.App("events")
+	if err != nil {
+		return fmt.Errorf("getting events app: %v", err)
+	}
+	h.events = eventsAppIface.(*caddyevents.App)
+
 	if h.GeoIpPath != "" {
 		db, err := geoip2.Open(h.GeoIpPath)
 		if err != nil {
@@ -103,7 +113,7 @@ func (h *Handler) Provision(ctx caddy.Context) error {
 		Password: h.Redis.Password,
 		DB:       h.Redis.DB})
 	h.pool = goredis.NewPool(h.redisClient)
-	_, err := h.redisClient.Ping(ctx.Context).Result()
+	_, err = h.redisClient.Ping(ctx.Context).Result()
 	if err != nil {
 		return fmt.Errorf("redis ping: %v", err)
 	}
@@ -189,7 +199,7 @@ func (h Handler) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyhtt
 				return next.ServeHTTP(w, r)
 			} else {
 				h.logger.Warn("unallow access from region", zap.Int("type", 1), zap.String("ip", ip_str), zap.String("zone", h.rateLimits[0].zoneName))
-				return h.rateLimitExceeded(w)
+				return h.rateLimitExceeded(w, h.rateLimits[0].zoneName, h.rateLimits[0].Window, ip_str)
 			}
 		}
 	}
@@ -221,7 +231,7 @@ func (h Handler) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyhtt
 				}
 			}
 			h.logger.Warn("rate limit exceeded", zap.Int("type", 2), zap.String("ip", ip_str), zap.String("zone", rl.zoneName))
-			return h.rateLimitExceeded(w)
+			return h.rateLimitExceeded(w, rl.zoneName, rl.Window, ip_str)
 		} else if err != nil {
 			return caddyhttp.Error(http.StatusTooManyRequests, nil)
 		}
@@ -230,7 +240,18 @@ func (h Handler) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyhtt
 	return next.ServeHTTP(w, r)
 }
 
-func (h *Handler) rateLimitExceeded(w http.ResponseWriter) error {
+func (h *Handler) rateLimitExceeded(w http.ResponseWriter, zoneName string, wait caddy.Duration, ip string) error {
+	h.events.Emit(h.ctx, "rate_limit_exceeded", map[string]any{
+		"zone":      zoneName,
+		"wait":      wait,
+		"remote_ip": ip,
+	})
+	logger := h.logger.With(
+		zap.String("zone", zoneName),
+		zap.Duration("wait", time.Duration(wait)),
+		zap.String("remote_ip", ip),
+	)
+	logger.Info("rate limit exceeded")
 	if h.Relocation != "" {
 		w.Header().Set("Location", h.Relocation)
 		return caddyhttp.Error(http.StatusTemporaryRedirect, nil)
